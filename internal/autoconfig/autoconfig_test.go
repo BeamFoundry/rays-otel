@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"sync"
 
@@ -141,9 +142,7 @@ func loadBaseOtelConfig(overrides map[string]any) {
 			"enabled": true,
 		},
 	}
-	for k, v := range overrides {
-		cfg[k] = v
-	}
+	maps.Copy(cfg, overrides)
 	GetContainer().EnableScanning()
 	Expect(GetContainer().LoadConfigAt(cfg, "rays.otel")).NotTo(HaveOccurred())
 }

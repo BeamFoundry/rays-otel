@@ -11,9 +11,13 @@ auto-configuring `TracerProvider`, `MeterProvider`, `LoggerProvider`, `TextMapPr
 
 ### Installation
 
-```go package main
+```go
+package main
 
-import ( "github.com/BeamFoundry/rays" _ "github.com/BeamFoundry/rays-otel") ```
+import ( "github.com/BeamFoundry/rays" 
+    _ "github.com/BeamFoundry/rays-otel"
+)
+```
 
 ### Guide
 1. [Configuration (`rays.otel`)](/rays-otel/docs/1-configuration/)

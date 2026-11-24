@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 
 	"go.opentelemetry.io/otel/trace"
 
@@ -125,7 +126,7 @@ func (this *MultiHandler) Handle(ctx context.Context, r slog.Record) error {
 func (this *MultiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	next := make([]slog.Handler, len(this.handlers))
 	for i, h := range this.handlers {
-		next[i] = h.WithAttrs(attrs)
+		next[i] = h.WithAttrs(slices.Clone(attrs))
 	}
 	return &MultiHandler{handlers: next}
 }

@@ -128,5 +128,45 @@ var _ = Describe("Logging Handlers", func() {
 			err := withErr.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelError, "err-msg", 0))
 			Expect(err).To(MatchError("boom"))
 		})
+
+		It("clones attrs per child handler so mutations do not affect other children", func() {
+			var buf1, buf2 bytes.Buffer
+			mutating := &mutatingAttrsHandler{
+				inner: slog.NewTextHandler(&buf1, &slog.HandlerOptions{Level: slog.LevelInfo}),
+			}
+			observer := slog.NewTextHandler(&buf2, &slog.HandlerOptions{Level: slog.LevelInfo})
+
+			attrs := []slog.Attr{slog.String("k", "original")}
+			mh := NewMultiHandler(mutating, observer).WithAttrs(attrs)
+
+			Expect(attrs[0].Value.String()).To(Equal("original"))
+			Expect(mh.Handle(context.Background(), slog.NewRecord(time.Now(), slog.LevelInfo, "msg", 0))).NotTo(HaveOccurred())
+			Expect(buf1.String()).To(ContainSubstring("k=mutated"))
+			Expect(buf2.String()).To(ContainSubstring("k=original"))
+		})
 	})
 })
+
+type mutatingAttrsHandler struct {
+	inner slog.Handler
+}
+
+func (this *mutatingAttrsHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return this.inner.Enabled(ctx, level)
+}
+
+//nolint:gocritic,wrapcheck // Respect slog.Handler interface
+func (this *mutatingAttrsHandler) Handle(ctx context.Context, r slog.Record) error {
+	return this.inner.Handle(ctx, r)
+}
+
+func (this *mutatingAttrsHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) > 0 {
+		attrs[0] = slog.String(attrs[0].Key, "mutated")
+	}
+	return &mutatingAttrsHandler{inner: this.inner.WithAttrs(attrs)}
+}
+
+func (this *mutatingAttrsHandler) WithGroup(name string) slog.Handler {
+	return &mutatingAttrsHandler{inner: this.inner.WithGroup(name)}
+}

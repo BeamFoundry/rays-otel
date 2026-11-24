@@ -22,8 +22,6 @@ Any singleton Beam implementing one of the interfaces in `github.com/BeamFoundry
 discovered and applied during initialization:
 
 - `OtelResourceCustomizer`: `CustomizeResource(attrs []attribute.KeyValue) []attribute.KeyValue`
-- `OtelTracerProviderCustomizer`: `CustomizeTracerProvider(opts []sdktrace.TracerProviderOption)
-[]sdktrace.TracerProviderOption`
+- `OtelTracerProviderCustomizer`: `CustomizeTracerProvider(opts []sdktrace.TracerProviderOption) []sdktrace.TracerProviderOption`
 - `OtelMeterProviderCustomizer`: `CustomizeMeterProvider(opts []sdkmetric.Option) []sdkmetric.Option`
-- `OtelLoggerProviderCustomizer`: `CustomizeLoggerProvider(opts []sdklog.LoggerProviderOption)
-[]sdklog.LoggerProviderOption`
+- `OtelLoggerProviderCustomizer`: `CustomizeLoggerProvider(opts []sdklog.LoggerProviderOption) []sdklog.LoggerProviderOption`
