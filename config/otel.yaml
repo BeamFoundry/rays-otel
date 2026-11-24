@@ -1,0 +1,34 @@
+rays:
+  otel:
+    enabled: true
+    serviceName: "rays-app"
+    serviceVersion: ""
+    environment: ""
+    resourceAttributes: {}
+    propagators:
+      - tracecontext
+      - baggage
+    traces:
+      enabled: true
+      exporter: none
+      endpoint: ""
+      insecure: false
+      headers: {}
+      sampleRatio: 1.0
+    metrics:
+      enabled: true
+      exporter: none
+      endpoint: ""
+      insecure: false
+      headers: {}
+      interval: 60s
+    logs:
+      enabled: true
+      exporter: none
+      endpoint: ""
+      insecure: false
+      headers: {}
+      bridge: true
+      traceContext: true
+    httpClient:
+      enabled: true
