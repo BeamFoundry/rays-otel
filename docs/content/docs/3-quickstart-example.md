@@ -108,6 +108,8 @@ type OrderService struct {
     ordersCounter otelmetric.Int64Counter
 }
 
+var _, _ = any(&OrderService{}).(Stereotype)
+
 func (this *OrderService) PostConstruct() Error {
     counter, err := this.meterProv.Meter("orders").Int64Counter("orders.created")
     if err != nil {

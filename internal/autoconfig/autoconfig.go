@@ -16,9 +16,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
-	nooplog "go.opentelemetry.io/otel/log/noop"
 	otelmetric "go.opentelemetry.io/otel/metric"
-	noopmetric "go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -26,7 +24,6 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
-	nooptrace "go.opentelemetry.io/otel/trace/noop"
 
 	. "github.com/BeamFoundry/rays-otel/pkg/core"
 	. "github.com/BeamFoundry/rays/pkg/core"
@@ -35,14 +32,89 @@ import (
 
 const shutdownTimeout = 5 * time.Second
 
-// OtelConfiguration auto-configures OpenTelemetry providers, propagators, slog integration,
-// and graceful shutdown based on [OtelProperties].
+// OtelConfiguration registers OpenTelemetry provider, propagator, and HTTP client Beams.
+// Concrete SDK initialization is performed by [OtelLifecycle] during the Service initialization phase
+// so all [Component] customizers have their dependencies injected and PostConstruct hooks completed first.
 type OtelConfiguration struct {
 	Configuration
+	props          *OtelProperties `@:"Inject"`
+	tracerDelegate *delegatingTracerProvider
+	meterDelegate  *delegatingMeterProvider
+	loggerDelegate *delegatingLoggerProvider
+	propDelegate   *delegatingPropagator
+	httpTransport  *delegatingTransport
+}
+
+var _, _ = any(&OtelConfiguration{}).(Stereotype)
+
+// New initializes the delegating provider wrappers for [OtelConfiguration].
+func (this OtelConfiguration) New() *OtelConfiguration {
+	this.tracerDelegate = newDelegatingTracerProvider()
+	this.meterDelegate = newDelegatingMeterProvider()
+	this.loggerDelegate = newDelegatingLoggerProvider()
+	this.propDelegate = newDelegatingPropagator()
+	this.httpTransport = newDelegatingTransport()
+	return &this
+}
+
+// TracerProvider provides the configured [oteltrace.TracerProvider] Beam.
+func (this *OtelConfiguration) TracerProvider(
+	_ struct {
+		ConditionalOnMissingBeam
+	},
+) oteltrace.TracerProvider {
+	return this.tracerDelegate
+}
+
+// MeterProvider provides the configured [otelmetric.MeterProvider] Beam.
+func (this *OtelConfiguration) MeterProvider(
+	_ struct {
+		ConditionalOnMissingBeam
+	},
+) otelmetric.MeterProvider {
+	return this.meterDelegate
+}
+
+// LoggerProvider provides the configured [otellog.LoggerProvider] Beam.
+func (this *OtelConfiguration) LoggerProvider(
+	_ struct {
+		ConditionalOnMissingBeam
+	},
+) otellog.LoggerProvider {
+	return this.loggerDelegate
+}
+
+// Propagator provides the configured [propagation.TextMapPropagator] Beam.
+func (this *OtelConfiguration) Propagator(
+	_ struct {
+		ConditionalOnMissingBeam
+	},
+) propagation.TextMapPropagator {
+	return this.propDelegate
+}
+
+// HTTPClient provides an [otelhttp]-instrumented [*http.Client] Beam when enabled.
+func (this *OtelConfiguration) HTTPClient(
+	_ struct {
+		ConditionalOnMissingBeam
+	},
+) *http.Client {
+	if !this.props.Enabled() || !this.props.HTTPClient().Enabled() {
+		return &http.Client{}
+	}
+	return &http.Client{
+		Transport: this.httpTransport,
+	}
+}
+
+// OtelLifecycle initializes OpenTelemetry SDK providers, customizers, slog integration,
+// and graceful shutdown during the Service lifecycle phase (after Component customizers initialize).
+type OtelLifecycle struct {
+	Service
 	logger              Logging                      `@:"Inject"`
 	txManager           Optional[TransactionManager] `@:"Inject"`
-	propagator          propagation.TextMapPropagator
-	props               *OtelProperties `@:"Inject"`
+	props               *OtelProperties              `@:"Inject"`
+	config              *OtelConfiguration           `@:"Inject"`
 	tracerProvider      *sdktrace.TracerProvider
 	meterProvider       *sdkmetric.MeterProvider
 	loggerProvider      *sdklog.LoggerProvider
@@ -53,14 +125,14 @@ type OtelConfiguration struct {
 }
 
 var (
-	_, _                   = any(&OtelConfiguration{}).(Stereotype)
-	_    BeamPostConstruct = &OtelConfiguration{}
-	_    BeamPreDestroy    = &OtelConfiguration{}
+	_, _                   = any(&OtelLifecycle{}).(Stereotype)
+	_    BeamPostConstruct = &OtelLifecycle{}
+	_    BeamPreDestroy    = &OtelLifecycle{}
 )
 
-// PostConstruct initializes configured OpenTelemetry providers, registers global instances,
-// and attaches the slog-to-OTel bridge / trace-context enricher when enabled.
-func (this *OtelConfiguration) PostConstruct() Error {
+// PostConstruct initializes configured OpenTelemetry providers, applies all initialized customizers,
+// registers global instances, and attaches the slog-to-OTel bridge / trace-context enricher.
+func (this *OtelLifecycle) PostConstruct() Error {
 	if !this.props.Enabled() {
 		this.logger.Debug("OpenTelemetry auto-configuration is disabled")
 		return nil
@@ -73,7 +145,7 @@ func (this *OtelConfiguration) PostConstruct() Error {
 	if err != nil {
 		return err
 	}
-	this.propagator = prop
+	this.config.propDelegate.set(prop)
 	otel.SetTextMapPropagator(prop)
 
 	if this.props.Traces().Enabled() {
@@ -95,10 +167,14 @@ func (this *OtelConfiguration) PostConstruct() Error {
 		this.wireLoggingBridge()
 	}
 
+	if this.props.HTTPClient().Enabled() {
+		this.config.httpTransport.set(otelhttp.NewTransport(nil))
+	}
+
 	return nil
 }
 
-func (this *OtelConfiguration) buildResource() *resource.Resource {
+func (this *OtelLifecycle) buildResource() *resource.Resource {
 	var attrs []attribute.KeyValue
 	if this.props.ServiceName() != "" {
 		attrs = append(attrs, semconv.ServiceName(this.props.ServiceName()))
@@ -124,7 +200,7 @@ func (this *OtelConfiguration) buildResource() *resource.Resource {
 	return res
 }
 
-func (this *OtelConfiguration) initTracerProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) initTracerProvider(ctx context.Context, res *resource.Resource) Error {
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(this.props.Traces().SampleRatio()))),
@@ -140,11 +216,12 @@ func (this *OtelConfiguration) initTracerProvider(ctx context.Context, res *reso
 		opts = customizer.CustomizeTracerProvider(opts)
 	}
 	this.tracerProvider = sdktrace.NewTracerProvider(opts...)
+	this.config.tracerDelegate.set(this.tracerProvider)
 	otel.SetTracerProvider(this.tracerProvider)
 	return nil
 }
 
-func (this *OtelConfiguration) initMeterProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) initMeterProvider(ctx context.Context, res *resource.Resource) Error {
 	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 	}
@@ -163,11 +240,12 @@ func (this *OtelConfiguration) initMeterProvider(ctx context.Context, res *resou
 		opts = customizer.CustomizeMeterProvider(opts)
 	}
 	this.meterProvider = sdkmetric.NewMeterProvider(opts...)
+	this.config.meterDelegate.set(this.meterProvider)
 	otel.SetMeterProvider(this.meterProvider)
 	return nil
 }
 
-func (this *OtelConfiguration) initLoggerProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) initLoggerProvider(ctx context.Context, res *resource.Resource) Error {
 	opts := []sdklog.LoggerProviderOption{
 		sdklog.WithResource(res),
 	}
@@ -182,11 +260,12 @@ func (this *OtelConfiguration) initLoggerProvider(ctx context.Context, res *reso
 		opts = customizer.CustomizeLoggerProvider(opts)
 	}
 	this.loggerProvider = sdklog.NewLoggerProvider(opts...)
+	this.config.loggerDelegate.set(this.loggerProvider)
 	otel.SetLoggerProvider(this.loggerProvider)
 	return nil
 }
 
-func (this *OtelConfiguration) wireLoggingBridge() {
+func (this *OtelLifecycle) wireLoggingBridge() {
 	bridge := this.props.Logs().Bridge()
 	traceCtx := this.props.Logs().TraceContext()
 	if !bridge && !traceCtx {
@@ -210,7 +289,7 @@ func (this *OtelConfiguration) wireLoggingBridge() {
 }
 
 // PreDestroy flushes and shuts down all initialized OpenTelemetry SDK providers.
-func (this *OtelConfiguration) PreDestroy() Error {
+func (this *OtelLifecycle) PreDestroy() Error {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
@@ -235,80 +314,4 @@ func (this *OtelConfiguration) PreDestroy() Error {
 		record(this.loggerProvider.Shutdown(ctx))
 	}
 	return firstErr
-}
-
-type wrappedTracerProvider struct {
-	oteltrace.TracerProvider
-}
-
-type wrappedMeterProvider struct {
-	otelmetric.MeterProvider
-}
-
-type wrappedLoggerProvider struct {
-	otellog.LoggerProvider
-}
-
-// TracerProvider provides the configured [oteltrace.TracerProvider] Beam.
-func (this *OtelConfiguration) TracerProvider(
-	_ struct {
-		ConditionalOnMissingBeam
-	},
-) oteltrace.TracerProvider {
-	if this.tracerProvider != nil {
-		return this.tracerProvider
-	}
-	return &wrappedTracerProvider{TracerProvider: nooptrace.NewTracerProvider()}
-}
-
-// MeterProvider provides the configured [otelmetric.MeterProvider] Beam.
-func (this *OtelConfiguration) MeterProvider(
-	_ struct {
-		ConditionalOnMissingBeam
-	},
-) otelmetric.MeterProvider {
-	if this.meterProvider != nil {
-		return this.meterProvider
-	}
-	return &wrappedMeterProvider{MeterProvider: noopmetric.NewMeterProvider()}
-}
-
-// LoggerProvider provides the configured [otellog.LoggerProvider] Beam.
-func (this *OtelConfiguration) LoggerProvider(
-	_ struct {
-		ConditionalOnMissingBeam
-	},
-) otellog.LoggerProvider {
-	if this.loggerProvider != nil {
-		return this.loggerProvider
-	}
-	return &wrappedLoggerProvider{LoggerProvider: nooplog.NewLoggerProvider()}
-}
-
-// Propagator provides the configured [propagation.TextMapPropagator] Beam.
-func (this *OtelConfiguration) Propagator(
-	_ struct {
-		ConditionalOnMissingBeam
-	},
-) propagation.TextMapPropagator {
-	if this.propagator != nil {
-		return this.propagator
-	}
-	return &wrappedPropagator{
-		TextMapPropagator: propagation.NewCompositeTextMapPropagator(),
-	}
-}
-
-// HTTPClient provides an [otelhttp]-instrumented [*http.Client] Beam when enabled.
-func (this *OtelConfiguration) HTTPClient(
-	_ struct {
-		ConditionalOnMissingBeam
-	},
-) *http.Client {
-	if !this.props.Enabled() || !this.props.HTTPClient().Enabled() {
-		return &http.Client{}
-	}
-	return &http.Client{
-		Transport: otelhttp.NewTransport(nil),
-	}
 }

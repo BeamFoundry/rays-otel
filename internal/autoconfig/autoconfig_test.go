@@ -22,6 +22,7 @@ import (
 
 	. "github.com/BeamFoundry/rays-otel/pkg/core"
 	. "github.com/BeamFoundry/rays/pkg/core"
+	. "github.com/BeamFoundry/rays/pkg/lang"
 	. "github.com/BeamFoundry/rays/pkg/testing"
 )
 
@@ -114,6 +115,42 @@ var (
 	_ OtelLoggerProviderCustomizer = &testCustomizers{}
 )
 
+type customizerDep struct {
+	Component
+	IgnoreScanning
+}
+
+func (this *customizerDep) Tag() string {
+	return "dep-ready"
+}
+
+type statefulCustomizer struct {
+	Component
+	IgnoreScanning
+	dep         *customizerDep `@:"Inject"`
+	initialized bool
+}
+
+func (this *statefulCustomizer) PostConstruct() Error {
+	this.initialized = true
+	return nil
+}
+
+func (this *statefulCustomizer) CustomizeResource(attrs []attribute.KeyValue) []attribute.KeyValue {
+	Expect(this.dep).NotTo(BeNil())
+	Expect(this.initialized).To(BeTrue())
+	return append(attrs, attribute.String("stateful.dep", this.dep.Tag()))
+}
+
+type statelessCustomizer struct {
+	Component
+	IgnoreScanning
+}
+
+func (this *statelessCustomizer) CustomizeResource(attrs []attribute.KeyValue) []attribute.KeyValue {
+	return append(attrs, attribute.String("stateless.key", "stateless.val"))
+}
+
 func loadBaseOtelConfig(overrides map[string]any) {
 	cfg := map[string]any{
 		"enabled":            true,
@@ -158,6 +195,12 @@ var _ = Describe("OtelConfiguration", func() {
 		}
 		_, err := GetContainer().AddBeamFor(customizers)
 		Expect(err).NotTo(HaveOccurred())
+		_, err = GetContainer().AddBeamFor(&customizerDep{})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = GetContainer().AddBeamFor(&statefulCustomizer{})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = GetContainer().AddBeamFor(&statelessCustomizer{})
+		Expect(err).NotTo(HaveOccurred())
 		Expect(GetContainer().Initialize()).NotTo(HaveOccurred())
 
 		tp := GetBeamDefaultInstance[oteltrace.TracerProvider]()
@@ -167,10 +210,19 @@ var _ = Describe("OtelConfiguration", func() {
 		client := GetBeamDefaultInstance[*http.Client]()
 
 		Expect(tp).NotTo(BeNil())
-		Expect(mp).NotTo(BeNil())
-		Expect(lp).NotTo(BeNil())
-		Expect(prop).NotTo(BeNil())
+		Expect(mp.Meter("test")).NotTo(BeNil())
+		Expect(lp.Logger("test")).NotTo(BeNil())
+		Expect(prop.Fields()).NotTo(BeEmpty())
 		Expect(client).NotTo(BeNil())
+
+		carrier := propagation.MapCarrier{}
+		prop.Inject(context.Background(), carrier)
+		Expect(prop.Extract(context.Background(), carrier)).NotTo(BeNil())
+
+		req, reqErr := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1:0", http.NoBody)
+		Expect(reqErr).NotTo(HaveOccurred())
+		_, rtErr := client.Transport.RoundTrip(req)
+		Expect(rtErr).To(HaveOccurred())
 
 		var buf bytes.Buffer
 		GetLogger().SetOutput(&buf)
@@ -185,7 +237,7 @@ var _ = Describe("OtelConfiguration", func() {
 
 		Expect(buf.String()).To(ContainSubstring("trace_id=" + span.SpanContext().TraceID().String()))
 		Expect(buf.String()).To(ContainSubstring("span_id=" + span.SpanContext().SpanID().String()))
-		Expect(spanRec.Ended()).To(HaveLen(1))
+		Expect(spanRec.Ended()).To(HaveLen(2))
 		logProc.mu.Lock()
 		var matched *sdklog.Record
 		for i := range logProc.records {
