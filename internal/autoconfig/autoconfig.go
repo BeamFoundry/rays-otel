@@ -132,11 +132,37 @@ var (
 
 // PostConstruct initializes configured OpenTelemetry providers, applies all initialized customizers,
 // registers global instances, and attaches the slog-to-OTel bridge / trace-context enricher.
-func (this *OtelLifecycle) PostConstruct() Error {
+func (this *OtelLifecycle) PostConstruct() (retErr Error) {
 	if !this.props.Enabled() {
 		this.logger.Debug("OpenTelemetry auto-configuration is disabled")
 		return nil
 	}
+
+	var (
+		createdTracer *sdktrace.TracerProvider
+		createdMeter  *sdkmetric.MeterProvider
+	)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if createdTracer != nil {
+			if err := createdTracer.Shutdown(shutdownCtx); err != nil {
+				NewWrappedError("OtelShutdownError", err).LogError()
+			}
+			this.tracerProvider = nil
+			this.config.tracerDelegate.set(nil)
+		}
+		if createdMeter != nil {
+			if err := createdMeter.Shutdown(shutdownCtx); err != nil {
+				NewWrappedError("OtelShutdownError", err).LogError()
+			}
+			this.meterProvider = nil
+			this.config.meterDelegate.set(nil)
+		}
+	}()
 
 	ctx := context.Background()
 	res := this.buildResource()
@@ -152,12 +178,14 @@ func (this *OtelLifecycle) PostConstruct() Error {
 		if err := this.initTracerProvider(ctx, res); err != nil {
 			return err
 		}
+		createdTracer = this.tracerProvider
 	}
 
 	if this.props.Metrics().Enabled() {
 		if err := this.initMeterProvider(ctx, res); err != nil {
 			return err
 		}
+		createdMeter = this.meterProvider
 	}
 
 	if this.props.Logs().Enabled() {
@@ -168,7 +196,8 @@ func (this *OtelLifecycle) PostConstruct() Error {
 	}
 
 	if this.props.HTTPClient().Enabled() {
-		this.config.httpTransport.set(otelhttp.NewTransport(nil))
+		//nolint:forbidigo // Intentionally share http.DefaultTransport connection pool across pre-init and SDK-init phases
+		this.config.httpTransport.set(otelhttp.NewTransport(http.DefaultTransport))
 	}
 
 	return nil

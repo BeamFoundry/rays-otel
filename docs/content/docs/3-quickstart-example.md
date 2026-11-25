@@ -40,6 +40,9 @@ func main() {
 }
 ```
 
+> [!NOTE]
+> `OrderRunner` below implements `BeamRunner` (`Component` + `Run(*sync.WaitGroup)`), so importing its package (e.g. `_ "myrepo/myapp/pkg/services"`) registers it automatically for `ctx.Run()`.
+
 ## 2. Configure `application.yaml`
 
 ```yaml
@@ -144,6 +147,19 @@ func (this *OrderService) CreateOrder(ctx context.Context, orderID string) Error
     _ = resp.Body.Close()
 
     return nil
+}
+
+type OrderRunner struct {
+    Component
+    orderService *OrderService `@:"Inject"`
+}
+
+var _, _ = any(&OrderRunner{}).(Stereotype)
+
+func (this *OrderRunner) Run(wg *sync.WaitGroup) {
+    wg.Go(func() {
+        _ = this.orderService.CreateOrder(context.Background(), "ORD-1001")
+    })
 }
 ```
 
