@@ -151,6 +151,7 @@ func newObservableInstrument[I any](
 		_ = h.get()
 	})
 	m.provider.mu.Unlock()
+	_ = h.get()
 	return wrap(h), nil
 }
 
@@ -367,7 +368,6 @@ func (this *delegatingRegistration) createBinding(meter otelmetric.Meter) (otelm
 			obsMap[inst] = unwrapped
 		} else {
 			resolved[i] = inst
-			obsMap[inst] = inst
 		}
 	}
 	wrappedFn := func(ctx context.Context, obs otelmetric.Observer) error {
@@ -448,18 +448,22 @@ type unwrappingObserver struct {
 }
 
 func (this *unwrappingObserver) ObserveInt64(obsrv otelmetric.Int64Observable, value int64, options ...otelmetric.ObserveOption) {
-	if mapped, ok := this.resolved[obsrv]; ok {
-		if typed, ok := mapped.(otelmetric.Int64Observable); ok {
-			obsrv = typed
+	if _, ok := obsrv.(unwrappableObservable); ok {
+		if mapped, ok := this.resolved[obsrv]; ok {
+			if typed, ok := mapped.(otelmetric.Int64Observable); ok {
+				obsrv = typed
+			}
 		}
 	}
 	this.Observer.ObserveInt64(obsrv, value, options...)
 }
 
 func (this *unwrappingObserver) ObserveFloat64(obsrv otelmetric.Float64Observable, value float64, options ...otelmetric.ObserveOption) {
-	if mapped, ok := this.resolved[obsrv]; ok {
-		if typed, ok := mapped.(otelmetric.Float64Observable); ok {
-			obsrv = typed
+	if _, ok := obsrv.(unwrappableObservable); ok {
+		if mapped, ok := this.resolved[obsrv]; ok {
+			if typed, ok := mapped.(otelmetric.Float64Observable); ok {
+				obsrv = typed
+			}
 		}
 	}
 	this.Observer.ObserveFloat64(obsrv, value, options...)

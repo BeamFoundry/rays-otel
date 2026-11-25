@@ -175,6 +175,21 @@ var _ = Describe("Delegating Providers and Rollback", func() {
 		Expect(err).NotTo(HaveOccurred())
 		mpDel.set(&partialErrorMeterProvider{MeterProvider: sdkMP, usable: usableCounter})
 		i64c.Add(ctx, 7)
+		var usableRM metricdata.ResourceMetrics
+		Expect(reader.Collect(ctx, &usableRM)).To(Succeed())
+		var foundUsable bool
+		for _, sm := range usableRM.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name == "usable.c" {
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					Expect(ok).To(BeTrue())
+					Expect(sum.DataPoints).To(HaveLen(1))
+					Expect(sum.DataPoints[0].Value).To(Equal(int64(7)))
+					foundUsable = true
+				}
+			}
+		}
+		Expect(foundUsable).To(BeTrue())
 
 		// 3. RegisterCallback returns error with non-nil registration -> unregisters partial registration
 		partialReg := &spyRegistration{}
