@@ -2,8 +2,11 @@ package autoconfig
 
 import (
 	"context"
+	"reflect"
+	"slices"
 	"sync"
 
+	"go.opentelemetry.io/otel"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	metricembedded "go.opentelemetry.io/otel/metric/embedded"
 	noopmetric "go.opentelemetry.io/otel/metric/noop"
@@ -11,10 +14,11 @@ import (
 
 type delegatingMeterProvider struct {
 	metricembedded.MeterProvider
-	inner     otelmetric.MeterProvider
-	callbacks []*delegatingRegistration
-	version   uint64
-	mu        sync.RWMutex
+	inner       otelmetric.MeterProvider
+	callbacks   []*delegatingRegistration
+	observables []func()
+	version     uint64
+	mu          sync.RWMutex
 }
 
 func newDelegatingMeterProvider() *delegatingMeterProvider {
@@ -31,10 +35,13 @@ func (this *delegatingMeterProvider) set(mp otelmetric.MeterProvider) {
 	this.mu.Lock()
 	this.inner = mp
 	this.version++
-	cbs := make([]*delegatingRegistration, len(this.callbacks))
-	copy(cbs, this.callbacks)
+	obsRebinds := slices.Clone(this.observables)
+	cbs := slices.Clone(this.callbacks)
 	this.mu.Unlock()
 
+	for _, rebindObs := range obsRebinds {
+		rebindObs()
+	}
 	for _, reg := range cbs {
 		reg.rebind()
 	}
@@ -52,9 +59,17 @@ func (this *delegatingMeterProvider) get() otelmetric.MeterProvider {
 	return this.inner
 }
 
+func (this *delegatingMeterProvider) snapshot() (mp otelmetric.MeterProvider, version uint64) {
+	this.mu.RLock()
+	defer this.mu.RUnlock()
+	return this.inner, this.version
+}
+
 func (this *delegatingMeterProvider) Meter(name string, options ...otelmetric.MeterOption) otelmetric.Meter {
 	return &delegatingMeter{
 		provider: this,
+		name:     name,
+		options:  options,
 		handle: &versionedHandle[otelmetric.Meter]{
 			provider: this,
 			create: func() otelmetric.Meter {
@@ -68,6 +83,44 @@ type delegatingMeter struct {
 	metricembedded.Meter
 	provider *delegatingMeterProvider
 	handle   *versionedHandle[otelmetric.Meter]
+	name     string
+	options  []otelmetric.MeterOption
+}
+
+func (this *delegatingMeter) meterSnapshot() (meter otelmetric.Meter, version uint64) {
+	mp, ver := this.provider.snapshot()
+	return mp.Meter(this.name, this.options...), ver
+}
+
+func isUsableInstrument[I any](inst I) bool {
+	v := reflect.ValueOf(&inst).Elem()
+	return !v.IsNil()
+}
+
+func newMeterInstrumentHandle[I any](
+	m *delegatingMeter,
+	create func(otelmetric.Meter) (I, error),
+) (*versionedHandle[I], error) {
+	ver := m.provider.currentVersion()
+	initial, err := create(m.handle.get())
+	if err != nil {
+		return nil, err
+	}
+	return &versionedHandle[I]{
+		provider:      m.provider,
+		cached:        initial,
+		cachedVersion: ver,
+		create: func() I {
+			inst, instErr := create(m.handle.get())
+			if instErr != nil {
+				otel.Handle(instErr)
+				if !isUsableInstrument(inst) {
+					return initial
+				}
+			}
+			return inst
+		},
+	}, nil
 }
 
 func newMeterInstrument[I any](
@@ -75,24 +128,30 @@ func newMeterInstrument[I any](
 	create func(otelmetric.Meter) (I, error),
 	wrap func(*versionedHandle[I]) I,
 ) (I, error) {
-	ver := m.provider.currentVersion()
-	initial, err := create(m.handle.get())
+	h, err := newMeterInstrumentHandle(m, create)
 	if err != nil {
 		var zero I
 		return zero, err
 	}
-	return wrap(&versionedHandle[I]{
-		provider:      m.provider,
-		cached:        initial,
-		cachedVersion: ver,
-		create: func() I {
-			inst, instErr := create(m.handle.get())
-			if instErr != nil {
-				return initial
-			}
-			return inst
-		},
-	}), nil
+	return wrap(h), nil
+}
+
+func newObservableInstrument[I any](
+	m *delegatingMeter,
+	create func(otelmetric.Meter) (I, error),
+	wrap func(*versionedHandle[I]) I,
+) (I, error) {
+	h, err := newMeterInstrumentHandle(m, create)
+	if err != nil {
+		var zero I
+		return zero, err
+	}
+	m.provider.mu.Lock()
+	m.provider.observables = append(m.provider.observables, func() {
+		_ = h.get()
+	})
+	m.provider.mu.Unlock()
+	return wrap(h), nil
 }
 
 func (this *delegatingMeter) Int64Counter(name string, options ...otelmetric.Int64CounterOption) (otelmetric.Int64Counter, error) {
@@ -140,7 +199,7 @@ func (this *delegatingMeter) Int64Gauge(name string, options ...otelmetric.Int64
 }
 
 func (this *delegatingMeter) Int64ObservableCounter(name string, options ...otelmetric.Int64ObservableCounterOption) (otelmetric.Int64ObservableCounter, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Int64ObservableCounter, error) {
 			return m.Int64ObservableCounter(name, options...)
 		},
@@ -151,7 +210,7 @@ func (this *delegatingMeter) Int64ObservableCounter(name string, options ...otel
 }
 
 func (this *delegatingMeter) Int64ObservableUpDownCounter(name string, options ...otelmetric.Int64ObservableUpDownCounterOption) (otelmetric.Int64ObservableUpDownCounter, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Int64ObservableUpDownCounter, error) {
 			return m.Int64ObservableUpDownCounter(name, options...)
 		},
@@ -162,7 +221,7 @@ func (this *delegatingMeter) Int64ObservableUpDownCounter(name string, options .
 }
 
 func (this *delegatingMeter) Int64ObservableGauge(name string, options ...otelmetric.Int64ObservableGaugeOption) (otelmetric.Int64ObservableGauge, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Int64ObservableGauge, error) {
 			return m.Int64ObservableGauge(name, options...)
 		},
@@ -217,7 +276,7 @@ func (this *delegatingMeter) Float64Gauge(name string, options ...otelmetric.Flo
 }
 
 func (this *delegatingMeter) Float64ObservableCounter(name string, options ...otelmetric.Float64ObservableCounterOption) (otelmetric.Float64ObservableCounter, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Float64ObservableCounter, error) {
 			return m.Float64ObservableCounter(name, options...)
 		},
@@ -228,7 +287,7 @@ func (this *delegatingMeter) Float64ObservableCounter(name string, options ...ot
 }
 
 func (this *delegatingMeter) Float64ObservableUpDownCounter(name string, options ...otelmetric.Float64ObservableUpDownCounterOption) (otelmetric.Float64ObservableUpDownCounter, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Float64ObservableUpDownCounter, error) {
 			return m.Float64ObservableUpDownCounter(name, options...)
 		},
@@ -239,7 +298,7 @@ func (this *delegatingMeter) Float64ObservableUpDownCounter(name string, options
 }
 
 func (this *delegatingMeter) Float64ObservableGauge(name string, options ...otelmetric.Float64ObservableGaugeOption) (otelmetric.Float64ObservableGauge, error) {
-	return newMeterInstrument(this,
+	return newObservableInstrument(this,
 		func(m otelmetric.Meter) (otelmetric.Float64ObservableGauge, error) {
 			return m.Float64ObservableGauge(name, options...)
 		},
@@ -257,15 +316,30 @@ func (this *delegatingMeter) RegisterCallback(f otelmetric.Callback, instruments
 	reg := &delegatingRegistration{
 		meter:       this,
 		fn:          f,
-		instruments: instruments,
+		instruments: slices.Clone(instruments),
 	}
-	if err := reg.bind(); err != nil {
-		return nil, err
+	for {
+		snapMeter, ver := this.meterSnapshot()
+		innerReg, err := reg.createBinding(snapMeter)
+		if err != nil {
+			return nil, err
+		}
+
+		this.provider.mu.Lock()
+		if this.provider.version == ver {
+			reg.mu.Lock()
+			reg.inner = innerReg
+			reg.mu.Unlock()
+			this.provider.callbacks = append(this.provider.callbacks, reg)
+			this.provider.mu.Unlock()
+			return reg, nil
+		}
+		this.provider.mu.Unlock()
+
+		// Provider generation changed concurrently; release stale binding and retry.
+		//nolint:errcheck // Best-effort cleanup of stale registration before retry
+		_ = innerReg.Unregister()
 	}
-	this.provider.mu.Lock()
-	this.provider.callbacks = append(this.provider.callbacks, reg)
-	this.provider.mu.Unlock()
-	return reg, nil
 }
 
 type delegatingRegistration struct {
@@ -278,27 +352,37 @@ type delegatingRegistration struct {
 	unregistered bool
 }
 
-func (this *delegatingRegistration) bind() error {
-	resolved := make([]otelmetric.Observable, len(this.instruments))
-	for i, inst := range this.instruments {
+func (this *delegatingRegistration) createBinding(meter otelmetric.Meter) (otelmetric.Registration, error) {
+	this.mu.Lock()
+	fn := this.fn
+	instruments := slices.Clone(this.instruments)
+	this.mu.Unlock()
+
+	obsMap := make(map[otelmetric.Observable]otelmetric.Observable, len(instruments))
+	resolved := make([]otelmetric.Observable, len(instruments))
+	for i, inst := range instruments {
 		if u, ok := inst.(unwrappableObservable); ok {
-			resolved[i] = u.unwrap()
+			unwrapped := u.unwrap()
+			resolved[i] = unwrapped
+			obsMap[inst] = unwrapped
 		} else {
 			resolved[i] = inst
+			obsMap[inst] = inst
 		}
 	}
 	wrappedFn := func(ctx context.Context, obs otelmetric.Observer) error {
-		return this.fn(ctx, &unwrappingObserver{Observer: obs})
+		return fn(ctx, &unwrappingObserver{Observer: obs, resolved: obsMap})
 	}
-	reg, err := this.meter.handle.get().RegisterCallback(wrappedFn, resolved...)
+	reg, err := meter.RegisterCallback(wrappedFn, resolved...)
 	if err != nil {
+		if reg != nil {
+			//nolint:errcheck // Best-effort cleanup of partial registration on error
+			_ = reg.Unregister()
+		}
 		//nolint:wrapcheck // Preserve otelmetric.Meter error semantics
-		return err
+		return nil, err
 	}
-	this.mu.Lock()
-	this.inner = reg
-	this.mu.Unlock()
-	return nil
+	return reg, nil
 }
 
 func (this *delegatingRegistration) rebind() {
@@ -308,13 +392,29 @@ func (this *delegatingRegistration) rebind() {
 		return
 	}
 	old := this.inner
+	this.inner = nil
 	this.mu.Unlock()
+
 	if old != nil {
 		//nolint:errcheck // Best-effort unregister before rebinding to active MeterProvider
 		_ = old.Unregister()
 	}
-	//nolint:errcheck // Best-effort rebind onto active MeterProvider
-	_ = this.bind()
+
+	newReg, err := this.createBinding(this.meter.handle.get())
+	if err != nil {
+		otel.Handle(err)
+		return
+	}
+
+	this.mu.Lock()
+	if this.unregistered {
+		this.mu.Unlock()
+		//nolint:errcheck // Cancellation won concurrently; discard replacement
+		_ = newReg.Unregister()
+		return
+	}
+	this.inner = newReg
+	this.mu.Unlock()
 }
 
 func (this *delegatingRegistration) Unregister() error {
@@ -322,7 +422,19 @@ func (this *delegatingRegistration) Unregister() error {
 	this.unregistered = true
 	reg := this.inner
 	this.inner = nil
+	this.fn = nil
+	this.instruments = nil
+	meter := this.meter
 	this.mu.Unlock()
+
+	if meter != nil && meter.provider != nil {
+		meter.provider.mu.Lock()
+		meter.provider.callbacks = slices.DeleteFunc(meter.provider.callbacks, func(item *delegatingRegistration) bool {
+			return item == this
+		})
+		meter.provider.mu.Unlock()
+	}
+
 	if reg != nil {
 		//nolint:wrapcheck // Preserve otelmetric.Registration error semantics
 		return reg.Unregister()
@@ -332,21 +444,22 @@ func (this *delegatingRegistration) Unregister() error {
 
 type unwrappingObserver struct {
 	otelmetric.Observer
+	resolved map[otelmetric.Observable]otelmetric.Observable
 }
 
 func (this *unwrappingObserver) ObserveInt64(obsrv otelmetric.Int64Observable, value int64, options ...otelmetric.ObserveOption) {
-	if u, ok := obsrv.(unwrappableObservable); ok {
-		if unwrapped, ok := u.unwrap().(otelmetric.Int64Observable); ok {
-			obsrv = unwrapped
+	if mapped, ok := this.resolved[obsrv]; ok {
+		if typed, ok := mapped.(otelmetric.Int64Observable); ok {
+			obsrv = typed
 		}
 	}
 	this.Observer.ObserveInt64(obsrv, value, options...)
 }
 
 func (this *unwrappingObserver) ObserveFloat64(obsrv otelmetric.Float64Observable, value float64, options ...otelmetric.ObserveOption) {
-	if u, ok := obsrv.(unwrappableObservable); ok {
-		if unwrapped, ok := u.unwrap().(otelmetric.Float64Observable); ok {
-			obsrv = unwrapped
+	if mapped, ok := this.resolved[obsrv]; ok {
+		if typed, ok := mapped.(otelmetric.Float64Observable); ok {
+			obsrv = typed
 		}
 	}
 	this.Observer.ObserveFloat64(obsrv, value, options...)

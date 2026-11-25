@@ -153,14 +153,12 @@ func (this *OtelLifecycle) PostConstruct() (retErr Error) {
 				NewWrappedError("OtelShutdownError", err).LogError()
 			}
 			this.tracerProvider = nil
-			this.config.tracerDelegate.set(nil)
 		}
 		if createdMeter != nil {
 			if err := createdMeter.Shutdown(shutdownCtx); err != nil {
 				NewWrappedError("OtelShutdownError", err).LogError()
 			}
 			this.meterProvider = nil
-			this.config.meterDelegate.set(nil)
 		}
 	}()
 
@@ -171,27 +169,48 @@ func (this *OtelLifecycle) PostConstruct() (retErr Error) {
 	if err != nil {
 		return err
 	}
-	this.config.propDelegate.set(prop)
-	otel.SetTextMapPropagator(prop)
 
 	if this.props.Traces().Enabled() {
-		if err := this.initTracerProvider(ctx, res); err != nil {
+		tp, err := this.buildTracerProvider(ctx, res)
+		if err != nil {
 			return err
 		}
-		createdTracer = this.tracerProvider
+		createdTracer = tp
+		this.tracerProvider = tp
 	}
 
 	if this.props.Metrics().Enabled() {
-		if err := this.initMeterProvider(ctx, res); err != nil {
+		mp, err := this.buildMeterProvider(ctx, res)
+		if err != nil {
 			return err
 		}
-		createdMeter = this.meterProvider
+		createdMeter = mp
+		this.meterProvider = mp
 	}
 
 	if this.props.Logs().Enabled() {
-		if err := this.initLoggerProvider(ctx, res); err != nil {
+		lp, err := this.buildLoggerProvider(ctx, res)
+		if err != nil {
 			return err
 		}
+		this.loggerProvider = lp
+	}
+
+	// All fallible setup succeeded: publish staged globals and delegates before HTTP transport setup.
+	this.config.propDelegate.set(prop)
+	otel.SetTextMapPropagator(prop)
+
+	if this.tracerProvider != nil {
+		this.config.tracerDelegate.set(this.tracerProvider)
+		otel.SetTracerProvider(this.tracerProvider)
+	}
+	if this.meterProvider != nil {
+		this.config.meterDelegate.set(this.meterProvider)
+		otel.SetMeterProvider(this.meterProvider)
+	}
+	if this.loggerProvider != nil {
+		this.config.loggerDelegate.set(this.loggerProvider)
+		otel.SetLoggerProvider(this.loggerProvider)
 		this.wireLoggingBridge()
 	}
 
@@ -229,14 +248,14 @@ func (this *OtelLifecycle) buildResource() *resource.Resource {
 	return res
 }
 
-func (this *OtelLifecycle) initTracerProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) buildTracerProvider(ctx context.Context, res *resource.Resource) (*sdktrace.TracerProvider, Error) {
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(this.props.Traces().SampleRatio()))),
 	}
 	exp, err := buildTraceExporter(ctx, this.props.Traces())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if exp != nil {
 		opts = append(opts, sdktrace.WithBatcher(exp))
@@ -244,19 +263,16 @@ func (this *OtelLifecycle) initTracerProvider(ctx context.Context, res *resource
 	for _, customizer := range this.tracerCustomizers {
 		opts = customizer.CustomizeTracerProvider(opts)
 	}
-	this.tracerProvider = sdktrace.NewTracerProvider(opts...)
-	this.config.tracerDelegate.set(this.tracerProvider)
-	otel.SetTracerProvider(this.tracerProvider)
-	return nil
+	return sdktrace.NewTracerProvider(opts...), nil
 }
 
-func (this *OtelLifecycle) initMeterProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) buildMeterProvider(ctx context.Context, res *resource.Resource) (*sdkmetric.MeterProvider, Error) {
 	opts := []sdkmetric.Option{
 		sdkmetric.WithResource(res),
 	}
 	exp, err := buildMetricExporter(ctx, this.props.Metrics())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if exp != nil {
 		var readerOpts []sdkmetric.PeriodicReaderOption
@@ -268,19 +284,16 @@ func (this *OtelLifecycle) initMeterProvider(ctx context.Context, res *resource.
 	for _, customizer := range this.meterCustomizers {
 		opts = customizer.CustomizeMeterProvider(opts)
 	}
-	this.meterProvider = sdkmetric.NewMeterProvider(opts...)
-	this.config.meterDelegate.set(this.meterProvider)
-	otel.SetMeterProvider(this.meterProvider)
-	return nil
+	return sdkmetric.NewMeterProvider(opts...), nil
 }
 
-func (this *OtelLifecycle) initLoggerProvider(ctx context.Context, res *resource.Resource) Error {
+func (this *OtelLifecycle) buildLoggerProvider(ctx context.Context, res *resource.Resource) (*sdklog.LoggerProvider, Error) {
 	opts := []sdklog.LoggerProviderOption{
 		sdklog.WithResource(res),
 	}
 	exp, err := buildLogExporter(ctx, this.props.Logs())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if exp != nil {
 		opts = append(opts, sdklog.WithProcessor(sdklog.NewBatchProcessor(exp)))
@@ -288,10 +301,7 @@ func (this *OtelLifecycle) initLoggerProvider(ctx context.Context, res *resource
 	for _, customizer := range this.loggerCustomizers {
 		opts = customizer.CustomizeLoggerProvider(opts)
 	}
-	this.loggerProvider = sdklog.NewLoggerProvider(opts...)
-	this.config.loggerDelegate.set(this.loggerProvider)
-	otel.SetLoggerProvider(this.loggerProvider)
-	return nil
+	return sdklog.NewLoggerProvider(opts...), nil
 }
 
 func (this *OtelLifecycle) wireLoggingBridge() {
