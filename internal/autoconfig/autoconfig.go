@@ -39,17 +39,17 @@ const shutdownTimeout = 5 * time.Second
 // and graceful shutdown based on [OtelProperties].
 type OtelConfiguration struct {
 	Configuration
-	logger              Logging            `@:"Inject"`
-	txManager           TransactionManager `@:"Inject{Optional=true}"`
+	logger              Logging                      `@:"Inject"`
+	txManager           Optional[TransactionManager] `@:"Inject"`
 	propagator          propagation.TextMapPropagator
 	props               *OtelProperties `@:"Inject"`
 	tracerProvider      *sdktrace.TracerProvider
 	meterProvider       *sdkmetric.MeterProvider
 	loggerProvider      *sdklog.LoggerProvider
-	resourceCustomizers []OtelResourceCustomizer       `@:"Inject{Optional=true}"`
-	tracerCustomizers   []OtelTracerProviderCustomizer `@:"Inject{Optional=true}"`
-	meterCustomizers    []OtelMeterProviderCustomizer  `@:"Inject{Optional=true}"`
-	loggerCustomizers   []OtelLoggerProviderCustomizer `@:"Inject{Optional=true}"`
+	resourceCustomizers []OtelResourceCustomizer       `@:"Inject"`
+	tracerCustomizers   []OtelTracerProviderCustomizer `@:"Inject"`
+	meterCustomizers    []OtelMeterProviderCustomizer  `@:"Inject"`
+	loggerCustomizers   []OtelLoggerProviderCustomizer `@:"Inject"`
 }
 
 var (
@@ -193,7 +193,7 @@ func (this *OtelConfiguration) wireLoggingBridge() {
 		return
 	}
 	lp := this.loggerProvider
-	txMgr := this.txManager
+	txMgr, _ := this.txManager.Get()
 	serviceName := this.props.ServiceName()
 
 	rays.ApplicationContext().WrapLoggingHandler(func(next slog.Handler) slog.Handler {
