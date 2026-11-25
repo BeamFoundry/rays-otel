@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0-rc.2](https://github.com/BeamFoundry/rays-otel/compare/v0.1.0-rc.1...v0.1.0-rc.2) (2026-11-25)
+
+
+### Miscellaneous Chores
+
+* **release:** prepare version v0.1.0-rc.2 ([d1a99fb](https://github.com/BeamFoundry/rays-otel/commit/d1a99fba47cae8c87e6c61649e34790239a127ce))
+
 ## 0.1.0-rc.1 (2026-11-25)
 
 
